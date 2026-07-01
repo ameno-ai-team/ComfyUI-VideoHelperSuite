@@ -5,12 +5,13 @@ import subprocess
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import uuid
+import tempfile
 from string import Template
 
 import folder_paths
 from .logger import logger
 from .load_video_nodes import LoadVideoUpload, LoadVideoPath
-from .utils import ffmpeg_path, requeue_workflow, merge_filter_args, ENCODE_ARGS, cached, ContainsAll
+from .utils import ffmpeg_path, merge_filter_args, ENCODE_ARGS, cached
 from comfy.utils import ProgressBar
 
 if 'VHS_video_formats' not in folder_paths.folder_names_and_paths:
@@ -132,6 +133,7 @@ class FfmpegProcess:
         self.proc.stdin.flush()
         self.proc.stdin.close()
         res = self.proc.stderr.read()
+        self.proc.wait()
         if len(res) > 0:
             print(res.decode(*ENCODE_ARGS), end="", file=sys.stderr)
         return self.total_frames_output
@@ -140,7 +142,6 @@ class VideoCombine:
     @classmethod
     def INPUT_TYPES(s):
         ffmpeg_formats, format_widgets = get_video_formats()
-        format_widgets["image/webp"] = [['lossless', "BOOLEAN", {'default': True}]]
         return {
             "required": {
                 "images": ("IMAGE",),
@@ -149,7 +150,7 @@ class VideoCombine:
                     {"default": 8, "min": 1, "step": 1},
                 ),
                 "filename_prefix": ("STRING", {"default": "AnimateDiff"}),
-                "format": (["image/gif", "image/webp"] + ffmpeg_formats, {'formats': format_widgets}),
+                "format": (ffmpeg_formats, {'formats': format_widgets}),
             },
             "optional": {
                 "audio": ("AUDIO",),
@@ -167,7 +168,7 @@ class VideoCombine:
         frame_rate: int,
         images=None,
         filename_prefix="AnimateDiff",
-        format="image/gif",
+        format="video/h264-mp4",
         audio=None,
         **kwargs
     ):
@@ -192,30 +193,56 @@ class VideoCombine:
 
         counter = str(uuid.uuid4())
 
-        _, format_ext = format.split("/")
-
-        has_alpha = first_image.shape[-1] == 4
-        kwargs["has_alpha"] = has_alpha
-        video_format = apply_format_widgets(format_ext, kwargs)
-
-        if has_alpha:
-            i_pix_fmt = 'rgba'
-        else:
-            i_pix_fmt = 'rgb24'
-
-        file = f"{filename}_{counter}.{video_format['extension']}"
+        file = f"{filename}_{counter}.mp4"
         file_path = os.path.join(full_output_folder, file)
 
-        args = [ffmpeg_path, "-v", "error", "-f", "rawvideo", "-pix_fmt", i_pix_fmt,
+        env = os.environ.copy()
+
+        # If audio is present, convert it to a temp WAV file up front so it
+        # can be fed to ffmpeg as a second -i input in the SAME pass as the
+        # video encode, instead of remuxing in a separate subprocess later.
+        audio_temp_path = None
+        if audio is not None:
+            channels = audio['waveform'].size(1)
+            audio_data = audio['waveform'].squeeze(0).transpose(0, 1).numpy().tobytes()
+
+            audio_temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            audio_temp_path = audio_temp.name
+            audio_temp.close()
+
+            wav_args = [ffmpeg_path, "-v", "error", "-y", "-f", "f32le",
+                "-ar", str(audio['sample_rate']), "-ac", str(channels),
+                "-i", "-", audio_temp_path]
+            try:
+                subprocess.run(wav_args, input=audio_data, env=env,
+                                check=True, capture_output=True)
+            except subprocess.CalledProcessError as e:
+                raise Exception("An error occurred converting audio:\n"
+                                 + e.stderr.decode(*ENCODE_ARGS))
+
+        args = [ffmpeg_path, "-v", "error", "-f", "rawvideo", "-pix_fmt", 'rgb24',
                 "-color_range", "pc", "-colorspace", "rgb", "-color_primaries", "bt709",
-                "-color_trc", video_format.get("fake_trc", "iec61966-2-1"),
+                "-color_trc", "bt709",
                 "-s", f"{first_image.shape[1]}x{first_image.shape[0]}", "-r", str(frame_rate), "-i", "-"]
 
-        args += video_format['main_pass']
+        if audio_temp_path:
+            args += ["-i", audio_temp_path, "-map", "0:v", "-map", "1:a", "-shortest"]
+
+        args += [
+            "-n", "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-crf", "19",
+            "-preset", "ultrafast",
+            "-vf", "scale=out_color_matrix=bt709",
+            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"
+        ]
+        if audio_temp_path:
+            args += ["-c:a", "aac", "-movflags", "use_metadata_tags"]
+
         merge_filter_args(args)
-        env = os.environ.copy()
+
         output_process = FfmpegProcess(args, file_path, env)
-            
+
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             images = executor.map(lambda x: tensor_to_bytes(x).tobytes(), images, chunksize=8)
 
@@ -226,31 +253,8 @@ class VideoCombine:
         output_process.close()
         output_files.append(file_path)
 
-        if audio is not None:
-            # Create audio file if input was provided
-            output_file_with_audio = f"{filename}_{counter}-audio.{video_format['extension']}"
-            output_file_with_audio_path = os.path.join(full_output_folder, output_file_with_audio)
-            channels = audio['waveform'].size(1)
-
-            mux_args = [ffmpeg_path, "-v", "error", "-n", "-i", file_path,
-                        "-ar", str(audio['sample_rate']), "-ac", str(channels),
-                        "-f", "f32le", "-i", "-", "-c:v", "copy"] \
-                        + video_format["audio_pass"] \
-                        + ["-shortest", output_file_with_audio_path]
-
-            audio_data = audio['waveform'].squeeze(0).transpose(0, 1).numpy().tobytes()
-            merge_filter_args(mux_args, '-af')
-            try:
-                subprocess.run(mux_args, input=audio_data,
-                                env=env, capture_output=True, check=True)
-            except subprocess.CalledProcessError as e:
-                raise Exception("An error occured in the ffmpeg subprocess:\n"
-                                 + e.stderr.decode(*ENCODE_ARGS))
-
-            output_files.append(output_file_with_audio_path)
-            # Return this file with audio to the webui.
-            # It will be muted unless opened or saved with right click
-            file = output_file_with_audio
+        if audio_temp_path:
+            os.remove(audio_temp_path)
 
         preview = {
             "filename": file,
@@ -259,7 +263,7 @@ class VideoCombine:
             "format": format,
             "frame_rate": frame_rate,
             "workflow": '',
-            "fullpath": output_files[-1],
+            "fullpath": file_path,
         }
         return {"ui": {"gifs": [preview]}, "result": ((True, output_files),)}
 
