@@ -1,39 +1,30 @@
 from .utils import ffmpeg_path, merge_filter_args, ENCODE_ARGS
 from .load_video_nodes import LoadVideoUpload, LoadVideoPath
-from concurrent.futures import ThreadPoolExecutor
 from comfy.utils import ProgressBar
 import folder_paths
-import numpy as np
 import subprocess
 import tempfile
+import torch
 import uuid
 import sys
 import os
 
-if 'VHS_video_formats' not in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["VHS_video_formats"] = ((),{".json"})
-if len(folder_paths.folder_names_and_paths['VHS_video_formats'][1]) == 0:
-    folder_paths.folder_names_and_paths["VHS_video_formats"][1].add(".json")
-audio_extensions = ['mp3', 'mp4', 'wav', 'ogg']
-
-def tensor_to_bytes(tensor):
-    tensor = tensor.cpu().numpy() * (2**8-1) + 0.5
-    return np.clip(tensor, 0, (2**8-1)).astype(np.uint8)
+def tensor_to_bytes_gpu(tensor_batch):
+    # tensor_batch: (N, H, W, C) on GPU, float in [0,1]
+    scaled = torch.clamp(tensor_batch * 255.0 + 0.5, 0, 255).to(torch.uint8)
+    return scaled.cpu().numpy()
 
 class FfmpegProcess:
     def __init__(self, args, file_path, env):
         self.proc = subprocess.Popen(args + [file_path], stderr=subprocess.PIPE,
                                       stdin=subprocess.PIPE, env=env)
-        self.total_frames_output = 0
 
     def write_frame(self, frame_data):
         try:
             self.proc.stdin.write(frame_data)
-            self.total_frames_output += 1
         except BrokenPipeError:
             res = self.proc.stderr.read()
-            raise Exception("An error occurred in the ffmpeg subprocess:\n"
-                             + res.decode(*ENCODE_ARGS))
+            raise Exception("An error occurred in the ffmpeg subprocess:\n" + res.decode(*ENCODE_ARGS))
 
     def close(self):
         self.proc.stdin.flush()
@@ -42,7 +33,6 @@ class FfmpegProcess:
         self.proc.wait()
         if len(res) > 0:
             print(res.decode(*ENCODE_ARGS), end="", file=sys.stderr)
-        return self.total_frames_output
 
 class VideoCombine:
     @classmethod
@@ -55,7 +45,6 @@ class VideoCombine:
                     {"default": 8, "min": 1, "step": 1},
                 ),
                 "filename_prefix": ("STRING", {"default": "AnimateDiff"}),
-                "format": (["video/h264-mp4"],),
             },
             "optional": {
                 "audio": ("AUDIO",),
@@ -73,7 +62,6 @@ class VideoCombine:
         frame_rate: int,
         images=None,
         filename_prefix="AnimateDiff",
-        format="video/h264-mp4",
         audio=None,
         **kwargs
     ):
@@ -81,7 +69,7 @@ class VideoCombine:
         pbar = ProgressBar(num_frames)
 
         first_image = images[0]
-        images = iter(images)
+        # images = iter(images)
 
         # get output information
         (
@@ -119,10 +107,12 @@ class VideoCombine:
                 raise Exception("An error occurred converting audio:\n"
                                  + e.stderr.decode(*ENCODE_ARGS))
 
-        args = [ffmpeg_path, "-v", "error", "-f", "rawvideo", "-pix_fmt", 'rgb24',
-                "-color_range", "pc", "-colorspace", "rgb", "-color_primaries", "bt709",
-                "-color_trc", "bt709",
-                "-s", f"{first_image.shape[1]}x{first_image.shape[0]}", "-r", str(frame_rate), "-i", "-"]
+        args = [
+            ffmpeg_path, "-v", "error", "-f", "rawvideo", "-pix_fmt", 'rgb24',
+            "-color_range", "pc", "-colorspace", "rgb", "-color_primaries", "bt709",
+            "-color_trc", "bt709",
+            "-s", f"{first_image.shape[1]}x{first_image.shape[0]}", "-r", str(frame_rate), "-i", "-"
+        ]
 
         if audio_temp_path:
             args += ["-i", audio_temp_path, "-map", "0:v", "-map", "1:a", "-shortest"]
@@ -141,24 +131,19 @@ class VideoCombine:
         merge_filter_args(args)
 
         output_process = FfmpegProcess(args, file_path, env)
-
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-            images = executor.map(lambda x: tensor_to_bytes(x).tobytes(), images, chunksize=8)
-
-            for image in images:
-                pbar.update(1)
-                output_process.write_frame(image)
+        byte_batch = tensor_to_bytes_gpu(images)
+        
+        for frame in byte_batch:
+            pbar.update(1)
+            output_process.write_frame(frame.tobytes())
 
         output_process.close()
-
-        if audio_temp_path:
-            os.remove(audio_temp_path)
 
         preview = {
             "filename": file,
             "subfolder": subfolder,
             "type": "output",
-            "format": format,
+            "format": "video/h264-mp4",
             "frame_rate": frame_rate,
             "workflow": '',
             "fullpath": file_path,
