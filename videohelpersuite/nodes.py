@@ -1,6 +1,5 @@
-from .utils import ffmpeg_path, merge_filter_args
-from .load_video_nodes import LoadVideoUpload, LoadVideoPath
-from comfy.utils import ProgressBar
+from .utils import ffmpeg_path
+from .load_video_nodes import LoadVideoUpload
 import folder_paths
 import subprocess
 import tempfile
@@ -40,12 +39,8 @@ class VideoCombine:
         frame_rate: int,
         images=None,
         filename_prefix="AnimateDiff",
-        audio=None,
-        **kwargs
+        audio=None
     ):
-        num_frames = len(images)
-        pbar = ProgressBar(num_frames)
-
         first_image = images[0]
 
         # get output information
@@ -62,9 +57,6 @@ class VideoCombine:
         file_path = os.path.join(full_output_folder, file)
         env = os.environ.copy()
 
-        # If audio is present, convert it to a temp WAV file up front so it
-        # can be fed to ffmpeg as a second -i input in the SAME pass as the
-        # video encode, instead of remuxing in a separate subprocess later.
         audio_temp_path = None
         if audio is not None:
             channels = audio['waveform'].size(1)
@@ -104,13 +96,10 @@ class VideoCombine:
         if audio_temp_path:
             args += ["-c:a", "aac", "-movflags", "use_metadata_tags"]
 
-        merge_filter_args(args)
-
-        output_process = subprocess.Popen(args + [file_path], stderr=subprocess.PIPE, stdin=subprocess.PIPE, env=env)
+        output_process = subprocess.Popen(args + [file_path], stdin=subprocess.PIPE, env=env)
         byte_batch = tensor_to_bytes_gpu(images)
-        
+
         for frame in byte_batch:
-            pbar.update(1)
             output_process.stdin.write(frame.tobytes())
 
         output_process.stdin.flush()
@@ -169,12 +158,10 @@ class VideoInfo:
 NODE_CLASS_MAPPINGS = {
     "VHS_VideoCombine": VideoCombine,
     "VHS_LoadVideo": LoadVideoUpload,
-    "VHS_LoadVideoPath": LoadVideoPath,
     "VHS_VideoInfo": VideoInfo,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_VideoCombine": "Video Combine 🎥🅥🅗🅢",
     "VHS_LoadVideo": "Load Video (Upload) 🎥🅥🅗🅢",
-    "VHS_LoadVideoPath": "Load Video (Path) 🎥🅥🅗🅢",
     "VHS_VideoInfo": "Video Info 🎥🅥🅗🅢",
 }

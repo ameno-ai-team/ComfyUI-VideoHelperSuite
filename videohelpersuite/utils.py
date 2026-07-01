@@ -92,11 +92,7 @@ else:
             ffmpeg_path = ffmpeg_paths[0]
         else:
             ffmpeg_path = max(ffmpeg_paths, key=ffmpeg_suitability)
-gifski_path = os.environ.get("VHS_GIFSKI", None)
-if gifski_path is None:
-    gifski_path = os.environ.get("JOV_GIFSKI", None)
-    if gifski_path is None:
-        gifski_path = shutil.which("gifski")
+
 ytdl_path = os.environ.get("VHS_YTDL", None) or shutil.which('yt-dlp') \
         or shutil.which('youtube-dl')
 download_history = {}
