@@ -11,7 +11,6 @@ import time
 import folder_paths
 from comfy.utils import common_upscale, ProgressBar
 import nodes
-from .logger import logger
 from .utils import BIGMAX, DIMMAX, calculate_file_hash, lazy_get_audio, strip_path, ffmpeg_path, ENCODE_ARGS
 
 
@@ -312,7 +311,7 @@ def load_video(meta_batch=None, unique_id=None, memory_limit_mb=None, vae=None,
                generator=resized_cv_frame_gen, format='None',  **kwargs):
     if 'force_size' in kwargs:
         kwargs.pop('force_size')
-        logger.warn("force_size has been removed. Did you reload the webpage after updating?")
+
     format = get_format(format)
     kwargs['video'] = strip_path(kwargs['video'])
     if vae is not None:
@@ -340,7 +339,6 @@ def load_video(meta_batch=None, unique_id=None, memory_limit_mb=None, vae=None,
         try:
             memory_limit = (psutil.virtual_memory().available + psutil.swap_memory().free) - 2 ** 27
         except:
-            logger.warn("Failed to calculate available memory. Memory load limit has been disabled")
             memory_limit = BIGMAX
     if vae is not None:
         #space required to load as f32, exist as latent with wiggle room, decode to f32
@@ -387,8 +385,6 @@ def load_video(meta_batch=None, unique_id=None, memory_limit_mb=None, vae=None,
         div, mod = format['frames'][:2]
         frames = (len(images) - mod) // div * div + mod
         images = images[:frames]
-        #Commenting out log message since it's displayed in UI. consider further
-        #logger.warn(err_msg + f" Output has been truncated to {len(images)} frames.")
     if 'start_time' in kwargs:
         start_time = kwargs['start_time']
     else:

@@ -1,20 +1,15 @@
-import hashlib
-import os
-from typing import Iterable
-import shutil
-import subprocess
-import re
 from collections.abc import Mapping
-import torch
-
-from .logger import logger
 import folder_paths
+import subprocess
+import hashlib
+import shutil
+import torch
+import os
+import re
 
 BIGMIN = -(2**53-1)
 BIGMAX = (2**53-1)
-
 DIMMAX = 8192
-
 ENCODE_ARGS = ("utf-8", 'backslashreplace')
 
 def ffmpeg_suitability(path):
@@ -48,8 +43,7 @@ else:
         ffmpeg_paths.append(imageio_ffmpeg_path)
     except:
         if "VHS_USE_IMAGEIO_FFMPEG" in os.environ:
-            raise
-        logger.warn("Failed to import imageio_ffmpeg")
+            raise Exception("Failed to import imageio_ffmpeg")
     if "VHS_USE_IMAGEIO_FFMPEG" in os.environ:
         ffmpeg_path = imageio_ffmpeg_path
     else:
@@ -61,7 +55,6 @@ else:
         if os.path.isfile("ffmpeg.exe"):
             ffmpeg_paths.append(os.path.abspath("ffmpeg.exe"))
         if len(ffmpeg_paths) == 0:
-            logger.error("No valid ffmpeg found.")
             ffmpeg_path = None
         elif len(ffmpeg_paths) == 1:
             #Evaluation of suitability isn't required, can take sole option
@@ -96,37 +89,6 @@ def try_download_video(url):
     download_history[url] = file
     return file
 
-def is_safe_path(path, strict=False):
-    if "VHS_STRICT_PATHS" not in os.environ and not strict:
-        return True
-    basedir = os.path.abspath('.')
-    try:
-        common_path = os.path.commonpath([basedir, path])
-    except:
-        #Different drive on windows
-        return False
-    return common_path == basedir
-
-def get_sorted_dir_files_from_directory(directory: str, skip_first_images: int=0, select_every_nth: int=1, extensions: Iterable=None):
-    directory = strip_path(directory)
-    dir_files = os.listdir(directory)
-    dir_files = sorted(dir_files)
-    dir_files = [os.path.join(directory, x) for x in dir_files]
-    dir_files = list(filter(lambda filepath: os.path.isfile(filepath), dir_files))
-    # filter by extension, if needed
-    if extensions is not None:
-        extensions = list(extensions)
-        new_dir_files = []
-        for filepath in dir_files:
-            ext = "." + filepath.split(".")[-1]
-            if ext.lower() in extensions:
-                new_dir_files.append(filepath)
-        dir_files = new_dir_files
-    # start at skip_first_images
-    dir_files = dir_files[skip_first_images:]
-    dir_files = dir_files[0::select_every_nth]
-    return dir_files
-
 
 # modified from https://stackoverflow.com/questions/22058048/hashing-a-file-in-python
 def calculate_file_hash(filename: str, hash_every_n: int = 1):
@@ -136,8 +98,6 @@ def calculate_file_hash(filename: str, hash_every_n: int = 1):
     h.update(filename.encode())
     h.update(str(os.path.getmtime(filename)).encode())
     return h.hexdigest()
-
-requeue_guard = [None, 0, 0, {}]
 
 def get_audio(file, start_time=0, duration=0):
     args = [ffmpeg_path, "-i", file]
@@ -186,28 +146,6 @@ class LazyAudioMap(Mapping):
 def lazy_get_audio(file, start_time=0, duration=0, **kwargs):
     return LazyAudioMap(file, start_time, duration)
 
-def is_url(url):
-    return url.split("://")[0] in ["http", "https"]
-
-def validate_sequence(path):
-    #Check if path is a valid ffmpeg sequence that points to at least one file
-    (path, file) = os.path.split(path)
-    if not os.path.isdir(path):
-        return False
-    match = re.search('%0?\\d+d', file)
-    if not match:
-        return False
-    seq = match.group()
-    if seq == '%d':
-        seq = '\\\\d+'
-    else:
-        seq = '\\\\d{%s}' % seq[1:-1]
-    file_matcher = re.compile(re.sub('%0?\\d+d', seq, file))
-    for file in os.listdir(path):
-        if file_matcher.fullmatch(file):
-            return True
-    return False
-
 def strip_path(path):
     #This leaves whitespace inside quotes and only a single "
     #thus ' ""test"' -> '"test'
@@ -219,24 +157,3 @@ def strip_path(path):
     if path.endswith("\""):
         path = path[:-1]
     return path
-def hash_path(path):
-    if path is None:
-        return "input"
-    if is_url(path):
-        return "url"
-    if not os.path.isfile(path):
-        return "DNE"
-    return calculate_file_hash(strip_path(path))
-
-
-def validate_path(path, allow_none=False, allow_url=True):
-    if path is None:
-        return allow_none
-    if is_url(path):
-        #Probably not feasible to check if url resolves here
-        if not allow_url:
-            return "URLs are unsupported for this path"
-        return is_safe_path(path)
-    if not os.path.isfile(strip_path(path)):
-        return "Invalid file path: {}".format(path)
-    return is_safe_path(path)
