@@ -83,7 +83,8 @@ class VideoCombine:
         ]
 
         if audio_temp_path:
-            args += ["-i", audio_temp_path, "-map", "0:v", "-map", "1:a", "-shortest"]
+            args += ["-i", audio_temp_path, "-map", "0:v", "-map", "1:a"]
+            # args += ["-af", "apad"]
 
         args += [
             "-n", "-c:v", "libx264",
@@ -109,7 +110,7 @@ class VideoCombine:
                 output_process.stdin.write(frame.tobytes())
             output_process.stdin.flush()
         except BrokenPipeError:
-            pass  # ffmpeg died early, real error is in stderr below
+            pass
 
         output_process.stdin.close()
         output_process.wait()
